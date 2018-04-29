@@ -29,6 +29,8 @@ type KVStore struct {
 	db *bolt.DB
 }
 
+type Iterator func(key, value []byte) error
+
 var (
 	// ErrNotFound is returned when the key supplied to a Get or Delete
 	// method does not exist in the database.
@@ -49,22 +51,32 @@ var (
 // time. Attempts to open the file from another process will fail with a
 // timeout error.
 func Open(path string) (*KVStore, error) {
-	opts := &bolt.Options{
+	return OpenWithOptions(path, &bolt.Options{
 		Timeout: 50 * time.Millisecond,
-	}
-	if db, err := bolt.Open(path, 0640, opts); err != nil {
+	})
+}
+
+func OpenReadOnly(path string) (*KVStore, error) {
+	return OpenWithOptions(path, &bolt.Options{
+		ReadOnly: true,
+		Timeout:  50 * time.Millisecond,
+	})
+}
+
+func OpenWithOptions(path string, opts *bolt.Options) (*KVStore, error) {
+	db, err := bolt.Open(path, 0640, opts)
+	if err != nil {
 		return nil, err
-	} else {
-		err := db.Update(func(tx *bolt.Tx) error {
+	}
+	if !opts.ReadOnly {
+		if err := db.Update(func(tx *bolt.Tx) error {
 			_, err := tx.CreateBucketIfNotExists(bucketName)
 			return err
-		})
-		if err != nil {
+		}); err != nil {
 			return nil, err
-		} else {
-			return &KVStore{db: db}, nil
 		}
 	}
+	return &KVStore{db: db}, nil
 }
 
 // Put an entry into the store. The passed value is gob-encoded and stored.
@@ -115,14 +127,24 @@ func (kvs *KVStore) Put(key string, value interface{}) error {
 func (kvs *KVStore) Get(key string, value interface{}) error {
 	return kvs.db.View(func(tx *bolt.Tx) error {
 		c := tx.Bucket(bucketName).Cursor()
-		if k, v := c.Seek([]byte(key)); k == nil || string(k) != key {
+		k, v := c.Seek([]byte(key))
+		if k == nil || string(k) != key {
 			return ErrNotFound
-		} else if value == nil {
-			return nil
-		} else {
-			d := gob.NewDecoder(bytes.NewReader(v))
-			return d.Decode(value)
 		}
+		if value == nil {
+			return nil
+		}
+		d := gob.NewDecoder(bytes.NewReader(v))
+		return d.Decode(value)
+	})
+}
+
+// Iterates over the entire bucket and executes the given func.
+func (kvs *KVStore) ForEach(i Iterator) error {
+	return kvs.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		b.ForEach(i)
+		return nil
 	})
 }
 
